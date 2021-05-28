@@ -13,7 +13,6 @@ import (
 )
 
 var re = regexp.MustCompile(`(\w{4}-\w+-\w+)\/`)
-var thicknessRE = regexp.MustCompile(`(.{4})x\w+x\w+`)
 var section string
 
 func main() {
@@ -38,15 +37,13 @@ func main() {
 	defer f.Close()
 
 	for pageIdx := 1; pageIdx <= r.NumPage(); pageIdx++ {
-		materialMapName, foundParts, thickness, err := processPage(r, pageIdx)
+		materialMapName, foundParts, err := processPage(r, pageIdx)
 
 		if err != nil {
 			fmt.Println("[i] skipping page", pageIdx)
 			continue
 		}
-		// by thickness
-		out(dxfFiles, thickness, foundParts)
-		// by material map
+
 		out(dxfFiles, materialMapName, foundParts)
 	}
 }
@@ -54,10 +51,6 @@ func main() {
 func out(dxf map[string]string, materialMapName string, parts []string) {
 	workingDir, _ := os.Getwd()
 	outDir := filepath.Join(workingDir, section, materialMapName)
-
-	if len(materialMapName) == 4 {
-		outDir = filepath.Join(workingDir, section, "_by thickness", materialMapName)
-	}
 
 	err := os.MkdirAll(outDir, 0755)
 	if err != nil {
@@ -79,31 +72,34 @@ func out(dxf map[string]string, materialMapName string, parts []string) {
 
 }
 
-func processPage(r *pdf.Reader, pageIdx int) (string, []string, string, error) {
+func processPage(r *pdf.Reader, pageIdx int) (string, []string, error) {
 	page := r.Page(pageIdx)
 
 	var materialMapName string
 
-	// skip profile pages
 	var text string
 	for _, t := range page.Content().Text {
 		text += strings.ToUpper(t.S)
 	}
 
 	if strings.Contains(text, "END A") {
-		return "", []string{}, "", fmt.Errorf("profile")
+		return "", []string{}, fmt.Errorf("profile")
 	}
 
 	if strings.Contains(text, "MARKING PLAN") {
-		return "", []string{}, "", fmt.Errorf("block marking plan")
+		return "", []string{}, fmt.Errorf("block marking plan")
 	}
 
 	if strings.Contains(text, "IN - COMING") {
-		return "", []string{}, "", fmt.Errorf("in-coming")
+		return "", []string{}, fmt.Errorf("in-coming")
 	}
 
 	if strings.Contains(text, "OUT - GOING") {
-		return "", []string{}, "", fmt.Errorf("out-going")
+		return "", []string{}, fmt.Errorf("out-going")
+	}
+
+	if strings.Contains(text, "BENDING TABLE") {
+		return "", []string{}, fmt.Errorf("profile bending table")
 	}
 
 	for _, v := range page.Content().Text {
@@ -130,7 +126,6 @@ func processPage(r *pdf.Reader, pageIdx int) (string, []string, string, error) {
 	materialMapName = strings.TrimSuffix(materialMapName, "Y")
 	materialMapName = strings.Trim(materialMapName, " ")
 
-	// skip profile pages
 	if materialMapName == "" {
 
 		/* for _, v := range page.Content().Text {
@@ -145,7 +140,7 @@ func processPage(r *pdf.Reader, pageIdx int) (string, []string, string, error) {
 		log.Fatalln(err)
 	}
 
-	return materialMapName, getPartsIds(pt), getThickness(pt), nil
+	return materialMapName, getPartsIds(pt), nil
 }
 
 func getPartsIds(in string) []string {
@@ -157,12 +152,6 @@ func getPartsIds(in string) []string {
 	}
 
 	return uniq(allParts)
-}
-
-func getThickness(in string) string {
-	m := thicknessRE.FindAllStringSubmatch(in, -1)
-
-	return m[0][1]
 }
 
 func walk(path string) (files map[string]string) {
