@@ -59,7 +59,7 @@ func out(dxf map[string]string, materialMapName string, parts []string) {
 
 	for file, path := range dxf {
 		for _, part := range parts {
-			if !strings.Contains(file, part) {
+			if !strings.HasSuffix(file, part) {
 				continue
 			}
 
