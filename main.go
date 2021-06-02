@@ -115,6 +115,10 @@ func processPage(r *pdf.Reader, pageIdx int) (string, []string, error) {
 			materialMapName += v.S
 		}
 
+		if v.X == 739.4345915472 && v.Y == 189.36515149200002 {
+			materialMapName += v.S
+		}
+
 		if v.X == 520.5597917759999 {
 			materialMapName += v.S
 		}
@@ -166,7 +170,7 @@ func walk(path string) (files map[string]string) {
 		b := filepath.Base(path)
 
 		// skip bending templates
-		if b[:2] == "fp" {
+		if b[:2] == "fp" || b[:5] == "templ" {
 			return nil
 		}
 
