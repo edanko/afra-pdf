@@ -1,33 +1,53 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/ledongthuc/pdf"
 )
 
-var re = regexp.MustCompile(`(\w{4}-\w+-\w+)\/`)
-var section string
+var (
+	partNameRe                 = regexp.MustCompile(`(\w{4}-\w+-\w+)\/\w+\/`)
+	errPageProfile             = errors.New("profile")
+	errPageProfileBendingTable = errors.New("profile bending table")
+	errPageMarkingPlan         = errors.New("block marking type")
+	errPageInComing            = errors.New("in-coming")
+	errPageOutGoing            = errors.New("out-going")
+)
+
+const (
+	byNcName = false
+)
+
+func isSkip(e error) bool {
+	switch e {
+	case errPageProfile,
+		errPageProfileBendingTable,
+		errPageMarkingPlan,
+		errPageInComing,
+		errPageOutGoing:
+		return true
+	default:
+		return false
+	}
+}
 
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatalln("[x] no input file")
 	}
 
-	fname := os.Args[1]
-	fname = filepath.Clean(fname)
-
-	spl := strings.Split(fname, " ")
-	section = strings.Replace(spl[len(spl)-1], ".pdf", "", 1)
-
-	fmt.Println("[i] section:", section)
-
+	fname := filepath.Clean(os.Args[1])
 	dxfFiles := walk("dxf")
 
 	f, r, err := pdf.Open(fname)
@@ -36,40 +56,72 @@ func main() {
 	}
 	defer f.Close()
 
+	wg := &sync.WaitGroup{}
 	for pageIdx := 1; pageIdx <= r.NumPage(); pageIdx++ {
-		materialMapName, foundParts, err := processPage(r, pageIdx)
+		wg.Add(1)
+		go func(pageIdx int) {
+			defer wg.Done()
+			materialMapName, foundParts, err := processPage(r, pageIdx)
 
-		if err != nil {
-			fmt.Println("[i] skipping page", pageIdx)
-			continue
-		}
+			if err != nil {
+				if isSkip(err) {
+					fmt.Printf("[i] page %d skipped: %s\n", pageIdx, err)
+				} else {
+					log.Fatalln(err)
+				}
+			}
 
-		out(dxfFiles, materialMapName, foundParts)
+			err = out(dxfFiles, materialMapName, foundParts)
+			if err != nil {
+				log.Fatalln(err)
+			}
+		}(pageIdx)
 	}
+	wg.Wait()
 }
 
-func out(dxf map[string]string, materialMapName string, parts []string) {
-	workingDir, _ := os.Getwd()
-	outDir := filepath.Join(workingDir, section, materialMapName)
+func out(dxf map[string]string, materialMapName string, parts []string) error {
+	outDir := filepath.Join("out", materialMapName)
 
 	err := os.MkdirAll(outDir, 0755)
 	if err != nil {
-		log.Fatalln("[x] can't create dir:", err)
+		return err
 	}
 
-	for file, path := range dxf {
-		for _, part := range parts {
-			if !strings.HasSuffix(file, part) {
-				continue
-			}
-
+	for _, part := range parts {
+		var found bool
+		if path, ok := dxf[part]; ok {
 			out := filepath.Join(outDir, filepath.Base(path))
 
-			fmt.Printf("[i] copying %s -> %s\n", part, materialMapName+string(filepath.Separator)+filepath.Base(path))
-			copy(filepath.Join(workingDir, path), out)
+			fmt.Printf("[c] %s -> %s\n", part, filepath.Join(materialMapName, filepath.Base(path)))
+			err = copyFile(path, out)
+			if err != nil {
+				return err
+			}
+			found = true
+		} else {
+			for _, m := range []string{"BA", "BB", "BC"} {
+				b := []byte(part)
+
+				b[5] = m[0]
+				b[6] = m[1]
+
+				if path, ok := dxf[string(b)]; ok {
+					out := filepath.Join(outDir, filepath.Base(path))
+					fmt.Printf("[r] %s (%s) -> %s\n", string(b), part, filepath.Join(materialMapName, filepath.Base(path)))
+					err = copyFile(path, out)
+					if err != nil {
+						return err
+					}
+					found = true
+				}
+			}
+		}
+		if !found {
+			fmt.Printf("[n] %s not found\n", part)
 		}
 	}
-
+	return nil
 }
 
 func processPage(r *pdf.Reader, pageIdx int) (string, []string, error) {
@@ -77,78 +129,81 @@ func processPage(r *pdf.Reader, pageIdx int) (string, []string, error) {
 
 	var materialMapName string
 
-	var text string
-	for _, t := range page.Content().Text {
-		text += strings.ToUpper(t.S)
-	}
-
-	if strings.Contains(text, "END A") {
-		return "", []string{}, fmt.Errorf("profile")
-	}
-
-	if strings.Contains(text, "MARKING PLAN") {
-		return "", []string{}, fmt.Errorf("block marking plan")
-	}
-
-	if strings.Contains(text, "IN - COMING") {
-		return "", []string{}, fmt.Errorf("in-coming")
-	}
-
-	if strings.Contains(text, "OUT - GOING") {
-		return "", []string{}, fmt.Errorf("out-going")
-	}
-
-	if strings.Contains(text, "BENDING TABLE") {
-		return "", []string{}, fmt.Errorf("profile bending table")
-	}
-
-	for _, v := range page.Content().Text {
-		if v.X == 736.7345893872 && v.Y == 189.36515149200002 {
-			materialMapName += v.S
-		}
-
-		if v.X == 736.6305893040001 && v.Y == 187.3391498712 {
-			materialMapName += v.S
-		}
-
-		if v.X == 736.7340893868001 && v.Y == 189.36540149220002 {
-			materialMapName += v.S
-		}
-
-		if v.X == 739.4345915472 && v.Y == 189.36515149200002 {
-			materialMapName += v.S
-		}
-
-		if v.X == 520.5597917759999 {
-			materialMapName += v.S
-		}
-		if v.X == 522.479791008 {
-			materialMapName += v.S
-		}
-	}
-
-	materialMapName = strings.TrimSuffix(materialMapName, "Y")
-	materialMapName = strings.Trim(materialMapName, " ")
-
-	if materialMapName == "" {
-
-		/* for _, v := range page.Content().Text {
-			fmt.Println(v.S, v.X, v.Y)
-		} */
-
-		log.Fatalf("[x] material map name not found on page %d\n", pageIdx)
-	}
-
 	pt, err := page.GetPlainText(nil)
 	if err != nil {
-		log.Fatalln(err)
+		return "", []string{}, err
+	}
+
+	if strings.Contains(pt, "END A") {
+		return "", []string{}, errPageProfile
+	}
+
+	if strings.Contains(pt, "MARKING PLAN") {
+		return "", []string{}, errPageMarkingPlan
+	}
+
+	if strings.Contains(pt, "IN - COMING") {
+		return "", []string{}, errPageInComing
+	}
+
+	if strings.Contains(pt, "OUT - GOING") {
+		return "", []string{}, errPageOutGoing
+	}
+
+	if strings.Contains(pt, "BENDING TABLE") {
+		return "", []string{}, errPageProfileBendingTable
+	}
+
+	/*for _, v := range page.Content().Text {
+		fmt.Println(v.S, v.X, v.Y)
+	}
+
+	os.Exit(1)*/
+
+	if byNcName {
+		var lasty float64
+		for _, v := range page.Content().Text {
+
+			x := math.Round(v.X*1000) / 1000
+
+			switch x {
+			case 73.800:
+				if v.Y-lasty > 2 {
+					lasty = v.Y
+					materialMapName += v.S
+				}
+			}
+		}
+	} else {
+		var lasty float64
+		for _, v := range page.Content().Text {
+
+			x := math.Round(v.X*1000) / 1000
+
+			switch x {
+			case 520.560:
+				if v.Y > 200 {
+					continue
+				}
+				fallthrough
+			case 736.735:
+				if v.Y-lasty > 2 {
+					lasty = v.Y
+					materialMapName += v.S
+				}
+			}
+		}
+	}
+
+	if materialMapName == "" {
+		materialMapName = "unknown"
 	}
 
 	return materialMapName, getPartsIds(pt), nil
 }
 
 func getPartsIds(in string) []string {
-	m := re.FindAllStringSubmatch(in, -1)
+	m := partNameRe.FindAllStringSubmatch(in, -1)
 
 	var allParts []string
 	for _, v := range m {
@@ -158,16 +213,22 @@ func getPartsIds(in string) []string {
 	return uniq(allParts)
 }
 
-func walk(path string) (files map[string]string) {
+func walk(path string) map[string]string {
+	files := make(map[string]string)
 
-	files = make(map[string]string)
+	err := fs.WalkDir(os.DirFS(path), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	walkfn := func(path string, info os.FileInfo, err error) error {
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 
 		b := filepath.Base(path)
+		if filepath.Ext(b) != ".dxf" {
+			return nil
+		}
 
 		// skip bending templates
 		if b[:2] == "fp" || b[:5] == "templ" {
@@ -175,16 +236,19 @@ func walk(path string) (files map[string]string) {
 		}
 
 		p := strings.TrimSuffix(b, filepath.Ext(b))
+		ss := strings.Split(p, "-")
+		ss = ss[len(ss)-3:]
+		p = strings.Join(ss, "-")
+
 		files[p] = path
 
 		return nil
-	}
+	})
 
-	err := filepath.Walk(path, walkfn)
 	if err != nil {
-		log.Fatalln("[x] walk error", err)
+		log.Fatalln(err)
 	}
-	return
+	return files
 }
 
 func uniq(in []string) []string {
@@ -201,26 +265,23 @@ func uniq(in []string) []string {
 	return u
 }
 
-func copy(src, dest string) {
-	if _, err := os.Stat(dest); !os.IsNotExist(err) {
-		fmt.Println(" -> file already exists, skipping...")
-		return
+func copyFile(src, dest string) error {
+	if _, err := os.Stat(dest); errors.Is(err, fs.ErrExist) {
+		return nil
 	}
 
 	from, err := os.Open(src)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer from.Close()
 
-	to, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE, 0666)
+	to, err := os.Create(dest)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer to.Close()
 
 	_, err = io.Copy(to, from)
-	if err != nil {
-		log.Fatal(err)
-	}
+	return err
 }
